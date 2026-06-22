@@ -1,10 +1,12 @@
-# OBJV — outcrop mesh viewer
+# Scarp — virtual outcrop viewer for the web
+
+[**Live demo →** sustainability-lab.github.io/scarp](https://sustainability-lab.github.io/scarp/)
 
 A fast, open-source, **zero-server** viewer for large photogrammetry meshes
 (virtual outcrops — like VRGS / LIME / CloudCompare, but in the browser).
 Built in **Rust**, rendered with **wgpu**, shipped as **WASM**. Your data never
 leaves the machine: everything (decompress, convert, render, measure) runs
-client-side.
+client-side. Meshes are stored in a compact `.objv` container.
 
 > Drop a 1 GB photogrammetry OBJ in your browser → it compresses to tens of MB,
 > renders 10M triangles, and you measure distances, cut cross-sections, and read
