@@ -16,20 +16,66 @@ pub struct ObjParse {
     pub skipped_lines: usize,
     /// Triangles dropped for referencing out-of-range vertices.
     pub dropped_triangles: usize,
+    /// True if lon/lat degrees were detected and projected to local metres.
+    pub projected_geographic: bool,
 }
 
 /// Parse OBJ text into a mesh (origin-offset, normals computed,
 /// vertices reordered for compression).
 pub fn obj_to_mesh(text: &str) -> ObjParse {
-    let parsed = parse_obj(text);
+    let mut parsed = parse_obj(text);
     let skipped_lines = parsed.skipped;
+    // Photogrammetry exports (e.g. Metashape) are sometimes in geographic
+    // degrees for X/Y and metres for Z, which renders as a degenerate sliver.
+    // Project such data to a local metre frame so proportions are correct.
+    let projected_geographic = maybe_project_geographic(&mut parsed.positions_world);
     let (mut mesh, dropped_triangles) = build_mesh(parsed);
     optimize_vertex_fetch(&mut mesh);
     ObjParse {
         mesh,
         skipped_lines,
         dropped_triangles,
+        projected_geographic,
     }
+}
+
+/// If the X/Y coordinates look like lon/lat degrees (in range, sub-degree span,
+/// and a Z range far larger than the horizontal span — the tell-tale of
+/// metres-over-degrees), project them in place to a local equirectangular metre
+/// frame centred on the data. Returns whether a projection was applied.
+fn maybe_project_geographic(pts: &mut [[f64; 3]]) -> bool {
+    if pts.is_empty() {
+        return false;
+    }
+    let (mut minx, mut maxx) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut miny, mut maxy) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut minz, mut maxz) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in pts.iter() {
+        minx = minx.min(p[0]);
+        maxx = maxx.max(p[0]);
+        miny = miny.min(p[1]);
+        maxy = maxy.max(p[1]);
+        minz = minz.min(p[2]);
+        maxz = maxz.max(p[2]);
+    }
+    let (xspan, yspan, zspan) = (maxx - minx, maxy - miny, maxz - minz);
+    let hspan = xspan.max(yspan);
+    let in_lonlat = minx >= -180.0 && maxx <= 180.0 && miny >= -90.0 && maxy <= 90.0;
+    // Degrees-over-metres tell: tiny horizontal span but a much larger Z range.
+    let looks_geographic = in_lonlat && hspan > 0.0 && hspan < 5.0 && zspan > 100.0 * hspan;
+    if !looks_geographic {
+        return false;
+    }
+    let lon0 = 0.5 * (minx + maxx);
+    let lat0 = 0.5 * (miny + maxy);
+    const M_PER_DEG_LAT: f64 = 111_320.0;
+    let m_per_deg_lon = M_PER_DEG_LAT * (lat0 * core::f64::consts::PI / 180.0).cos();
+    for p in pts.iter_mut() {
+        p[0] = (p[0] - lon0) * m_per_deg_lon;
+        p[1] = (p[1] - lat0) * M_PER_DEG_LAT;
+        // p[2] (Z) already in metres.
+    }
+    true
 }
 
 /// Relabel vertices in the order triangles first reference them (a lossless

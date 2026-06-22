@@ -907,6 +907,9 @@ pub fn convert_obj(obj: Vec<u8>, quantize: bool) -> Result<Vec<u8>, JsValue> {
         objv_obj::obj_to_mesh(text)
     };
     drop(obj); // free the (possibly ~1 GB) source before encoding/compressing
+    if parsed.projected_geographic {
+        log::info!("detected lon/lat degrees → projected to a local metre frame");
+    }
     log::info!(
         "converted OBJ: {} verts, {} tris",
         parsed.mesh.vertex_count(),

@@ -111,6 +111,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     drop(data); // release the source buffer; `mesh` owns its own copies
+    if parse.projected_geographic {
+        eprintln!("  detected lon/lat degrees → projected to a local metre frame");
+    }
     if parse.dropped_triangles > 0 {
         eprintln!(
             "  warning: dropped {} triangle(s) with out-of-range indices",
