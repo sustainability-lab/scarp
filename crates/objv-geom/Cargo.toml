@@ -1,0 +1,8 @@
+[package]
+name = "objv-geom"
+version = "0.1.0"
+edition = "2021"
+description = "Pure geometry for OBJV analysis tools: ray-cast, plane-fit, slicing"
+
+# Zero dependencies, compiles native (for tests) and wasm (for the viewer).
+[dependencies]

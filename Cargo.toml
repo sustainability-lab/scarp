@@ -1,0 +1,30 @@
+# Workspace for the OBJV outcrop-mesh toolkit.
+#
+# Layout mirrors the GeoLibre `crates/` convention (opengeos/geolibre-rust):
+# pure-Rust, compiles to native (the converter) and WASM (the viewer), no server.
+#
+#   objv-format   shared on-disk container format (.objv)
+#   objv-convert  native CLI: 1 GB ASCII OBJ  ->  compact compressed .objv
+#   objv-viewer   wgpu renderer -> WASM (added in the viewer phase)
+[workspace]
+resolver = "2"
+members = [
+    "crates/objv-format",
+    "crates/objv-geom",
+    "crates/objv-obj",
+    "crates/objv-convert",
+    "crates/objv-viewer",
+]
+# `cargo build` (native) builds only these; the viewer is built for wasm32
+# explicitly via wasm-pack, so it's kept out of the default native build.
+default-members = [
+    "crates/objv-format",
+    "crates/objv-geom",
+    "crates/objv-obj",
+    "crates/objv-convert",
+]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

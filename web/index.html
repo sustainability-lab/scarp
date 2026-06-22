@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>OBJV — outcrop mesh viewer</title>
+<style>
+  :root {
+    --bg: #0c0e12; --panel: rgba(20,24,31,0.82); --line: rgba(255,255,255,0.08);
+    --text: #e6e9ef; --muted: #9aa3b2; --accent: #c44536;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body { font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--text); }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  .panel, .card {
+    backdrop-filter: blur(12px); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+  }
+  .panel { position: fixed; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; background: #1b2027; color: #cfd6e2;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; }
+
+  /* top-left info */
+  #hud { top: 16px; left: 16px; padding: 14px 16px; width: 268px; }
+  #hud h1 { margin: 0 0 2px; font-size: 14px; letter-spacing: 0.02em; }
+  #hud h1 b { color: var(--accent); }
+  #hud .sub { color: var(--muted); font-size: 11px; margin-bottom: 10px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); }
+  #hud .row span:last-child { color: var(--text); font-variant-numeric: tabular-nums; }
+  #hud .hint { margin-top: 10px; color: var(--muted); font-size: 11px; line-height: 1.9; }
+  #hud .actions { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  #hud .actions button, #download {
+    appearance: none; cursor: pointer; font: inherit; font-size: 12px; text-decoration: none;
+    border: 1px solid var(--line); background: #161b22; color: var(--text);
+    border-radius: 8px; padding: 7px 12px; display: inline-flex; align-items: center; gap: 6px;
+  }
+  #hud .actions button:hover { border-color: rgba(255,255,255,0.25); }
+  #download { background: rgba(196,69,54,0.18); border-color: rgba(196,69,54,0.5); color: #ffb3a8; }
+  #download[hidden] { display: none; }
+
+  /* top-right legend */
+  #legend { top: 16px; right: 16px; padding: 12px 14px; width: 150px; }
+  #legend .title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+  .leg[hidden] { display: none; }
+  .leg-row { display: flex; gap: 8px; }
+  .bar { border-radius: 4px; flex: none; }
+  .bar.vert { width: 14px; height: 116px; }
+  .bar.elev   { background: linear-gradient(to top, rgb(46,92,56), rgb(140,133,77) 33%, rgb(133,102,71) 66%, rgb(217,214,209)); }
+  .bar.slope  { background: linear-gradient(to top, rgb(51,77,179), rgb(230,64,51)); }
+  .axis { display: flex; flex-direction: column; justify-content: space-between; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bar.aspect { width: 100%; height: 14px; background: linear-gradient(to right,
+      hsl(0,55%,70%), hsl(90,55%,70%) 25%, hsl(180,55%,70%) 50%, hsl(270,55%,70%) 75%, hsl(360,55%,70%)); }
+  .axis-h { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .leg-note { color: var(--muted); font-size: 11px; }
+
+  /* bottom-left stack: results + tools + colormaps */
+  #stack { position: fixed; bottom: 16px; left: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  #results { padding: 10px 14px; min-width: 200px; white-space: pre-line; font-size: 12px;
+    color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.55; }
+  #results .rtitle { color: var(--muted); font-size: 11px; }
+  .btnrow { padding: 8px; display: flex; gap: 6px; }
+  .btnrow .grp-label { align-self: center; color: var(--muted); font-size: 11px; padding: 0 6px 0 2px; }
+  .btnrow button {
+    appearance: none; border: 1px solid var(--line); background: #161b22; color: var(--muted);
+    border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 12px; cursor: pointer; transition: all 0.12s ease;
+  }
+  .btnrow button:hover { color: var(--text); border-color: rgba(255,255,255,0.2); }
+  .btnrow button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  #status { bottom: 16px; right: 16px; padding: 8px 14px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #status.busy { color: #ffd479; } #status.error { color: #ff7a6c; }
+
+  #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(12,14,18,0.7); backdrop-filter: blur(4px); z-index: 10; border: 2px dashed var(--accent); font-size: 18px; }
+  body.dragging #drop { display: flex; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="hud" class="panel">
+  <h1><b>OBJV</b> outcrop viewer</h1>
+  <div class="sub">Rust · wgpu · WASM — zero-server</div>
+  <div class="row"><span>Vertices</span><span id="m-verts">—</span></div>
+  <div class="row"><span>Triangles</span><span id="m-tris">—</span></div>
+  <div class="row"><span>File</span><span id="m-size">—</span></div>
+  <div class="row"><span>Tool</span><span id="m-tool">navigate</span></div>
+  <div class="hint">
+    <kbd>drag</kbd> rotate · <kbd>scroll</kbd> zoom<br>
+    with a tool active, <kbd>click</kbd> the surface to place points<br>
+    <kbd>u</kbd> undo point · <kbd>x</kbd> clear
+  </div>
+  <div class="actions">
+    <button id="open">Open .obj / .objv…</button>
+    <a id="download" hidden></a>
+  </div>
+</div>
+
+<div id="legend" class="panel">
+  <div class="leg" data-mode="2">
+    <div class="title">Elevation</div>
+    <div class="leg-row"><div class="bar vert elev"></div>
+      <div class="axis"><span id="leg-zmax">—</span><span id="leg-zmin">—</span></div></div>
+  </div>
+  <div class="leg" data-mode="3" hidden>
+    <div class="title">Slope angle</div>
+    <div class="leg-row"><div class="bar vert slope"></div>
+      <div class="axis"><span>90° vertical</span><span>0° flat</span></div></div>
+  </div>
+  <div class="leg" data-mode="4" hidden>
+    <div class="title">Aspect (facing)</div>
+    <div class="bar aspect"></div>
+    <div class="axis-h"><span>N</span><span>E</span><span>S</span><span>W</span><span>N</span></div>
+  </div>
+  <div class="leg" data-mode="1" hidden>
+    <div class="title">Shaded relief</div>
+    <div class="leg-note">neutral grey surface, lit from the NW — read shape from shadow only.</div>
+  </div>
+</div>
+
+<div id="stack">
+  <div id="results" class="card"><span class="rtitle">navigate · pick a tool to measure</span></div>
+  <div id="tools" class="btnrow card">
+    <span class="grp-label">Tools</span>
+    <button data-key="n" class="active">Navigate</button>
+    <button data-key="m">Measure</button>
+    <button data-key="s">Section</button>
+    <button data-key="d">Dip</button>
+    <button data-key="x">Clear</button>
+  </div>
+  <div id="modes" class="btnrow card">
+    <span class="grp-label">Color</span>
+    <button data-key="1">Shaded</button>
+    <button data-key="2" class="active">Elevation</button>
+    <button data-key="3">Slope</button>
+    <button data-key="4">Aspect</button>
+  </div>
+</div>
+
+<div id="status" class="panel">initializing…</div>
+<div id="drop">drop <code>.obj</code> (auto-compresses) or <code>.objv</code></div>
+<input id="file" type="file" accept=".obj,.objv" hidden />
+
+<script type="module">
+import init, { start, convert_obj } from './pkg/objv_viewer.js';
+
+const canvas = document.getElementById('gl');
+const statusEl = document.getElementById('status');
+const setStatus = (m, c = '') => { statusEl.textContent = m; statusEl.className = 'panel ' + c; };
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(window.innerWidth * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+}
+resize(); window.addEventListener('resize', resize);
+
+// Show the legend panel matching the active colormap key (1–4).
+function updateLegend(key) {
+  document.querySelectorAll('#legend .leg').forEach(el =>
+    el.hidden = el.dataset.mode !== key);
+}
+
+// Button rows dispatch the same keyboard shortcuts the Rust side listens for.
+function wireRow(sel, keys, exclusive) {
+  document.querySelectorAll(sel + ' button').forEach(b => b.addEventListener('click', () => {
+    if (exclusive && b.dataset.key !== 'x') setActive(sel, b.dataset.key);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: b.dataset.key }));
+  }));
+}
+function setActive(sel, key) {
+  document.querySelectorAll(sel + ' button').forEach(b => b.classList.toggle('active', b.dataset.key === key));
+}
+wireRow('#modes', '1234', true);
+wireRow('#tools', 'nmsdx', true);
+window.addEventListener('keydown', e => {
+  if ('1234'.includes(e.key)) { setActive('#modes', e.key); updateLegend(e.key); }
+  if ('nmsd'.includes(e.key.toLowerCase()) && e.key.length === 1) setActive('#tools', e.key.toLowerCase());
+});
+
+let started = false;
+function loadBytes(bytes, label) {
+  document.getElementById('m-size').textContent = (bytes.length / 1e6).toFixed(1) + ' MB';
+  if (started) { location.reload(); return; }
+  started = true;
+  setStatus('uploading to GPU…', 'busy');
+  start(canvas, bytes);
+  setTimeout(() => setStatus(label || 'ready', ''), 400);
+}
+
+function offerDownload(bytes, filename) {
+  const a = document.getElementById('download');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  a.download = filename;
+  a.textContent = '⬇ ' + filename + '  (' + (bytes.length / 1e6).toFixed(1) + ' MB)';
+  a.hidden = false;
+}
+
+// Route a dropped/opened file: .obj is converted in-browser, then viewed;
+// .objv is viewed directly.
+async function handleFile(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (file.name.toLowerCase().endsWith('.obj')) {
+    setStatus('converting OBJ in-browser…', 'busy');
+    // Let the status paint before the (synchronous) conversion blocks the thread.
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try {
+      const t0 = performance.now();
+      const objv = convert_obj(buf, true);
+      const ms = Math.round(performance.now() - t0);
+      const outName = file.name.replace(/\.obj$/i, '.objv');
+      offerDownload(objv, outName);
+      setStatus(`compressed ${(buf.length/1e6).toFixed(0)} → ${(objv.length/1e6).toFixed(1)} MB in ${ms} ms`, '');
+      loadBytes(objv, outName);
+    } catch (e) {
+      setStatus('convert failed: ' + e, 'error');
+    }
+  } else {
+    loadBytes(buf, file.name);
+  }
+}
+
+window.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', e => { if (e.target.id === 'drop') document.body.classList.remove('dragging'); });
+window.addEventListener('drop', async e => {
+  e.preventDefault(); document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+document.getElementById('open').addEventListener('click', () => document.getElementById('file').click());
+document.getElementById('file').addEventListener('change', e => {
+  const f = e.target.files[0]; if (f) handleFile(f);
+});
+
+(async function main() {
+  setStatus('loading wasm…', 'busy');
+  await init();
+  updateLegend('2');
+  setStatus('ready — drop an .objv or load default', '');
+  try {
+    // Default to the tiny bundled sample; pass ?mesh=… for your own file
+    // (e.g. ?mesh=WadiBirk_web.objv when viewing locally).
+    const url = new URLSearchParams(location.search).get('mesh') || 'sample.objv';
+    setStatus('fetching ' + url + '…', 'busy');
+    const res = await fetch(url);
+    if (res.ok) loadBytes(new Uint8Array(await res.arrayBuffer()), url);
+    else setStatus('ready — drop an .objv to load', '');
+  } catch (_) { setStatus('ready — drop an .objv to load', ''); }
+})();
+</script>
+</body>
+</html>

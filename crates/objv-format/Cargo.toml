@@ -1,0 +1,11 @@
+[package]
+name = "objv-format"
+version = "0.1.0"
+edition = "2021"
+description = "Shared on-disk container format for OBJV compact outcrop meshes"
+
+# Deliberately zero dependencies: this crate is shared by the native converter
+# and the WASM viewer, so it must compile cleanly to wasm32 and stay tiny.
+# Compression is applied by the caller (zstd on the converter, ruzstd in the
+# viewer); this crate only knows the byte layout.
+[dependencies]

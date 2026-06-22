@@ -1,0 +1,16 @@
+[package]
+name = "objv-convert"
+version = "0.1.0"
+edition = "2021"
+description = "Convert a photogrammetry OBJ into a compact compressed OBJV mesh"
+
+[[bin]]
+name = "objv-convert"
+path = "src/main.rs"
+
+[dependencies]
+objv-format = { path = "../objv-format" }
+objv-obj = { path = "../objv-obj" }
+# Native-only: fast C-backed zstd encoder. The viewer decodes with pure-Rust
+# ruzstd, so this dependency never reaches the WASM bundle.
+zstd = "0.13"

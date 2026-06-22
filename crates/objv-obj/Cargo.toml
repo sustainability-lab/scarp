@@ -1,0 +1,10 @@
+[package]
+name = "objv-obj"
+version = "0.1.0"
+edition = "2021"
+description = "Parse ASCII OBJ geometry into an OBJV mesh (origin offset + normals)"
+
+# Pure Rust, no deps beyond the shared format — compiles to wasm so the browser
+# can convert OBJ files without a server.
+[dependencies]
+objv-format = { path = "../objv-format" }

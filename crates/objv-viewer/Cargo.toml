@@ -1,0 +1,50 @@
+[package]
+name = "objv-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "wgpu/WASM viewer for OBJV outcrop meshes"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+objv-format = { path = "../objv-format" }
+objv-geom = { path = "../objv-geom" }
+objv-obj = { path = "../objv-obj" }
+glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+# Pure-Rust zstd decoder — keeps the WASM bundle free of any C/emscripten code.
+ruzstd = "0.8"
+# Pure-Rust deflate (encode + decode): used to compress OBJ→OBJV in the browser
+# and to decode browser-made files. (CLI-made files use zstd, decoded above.)
+miniz_oxide = "0.8"
+log = "0.4"
+
+# wgpu with the WebGL2 backend enabled so the viewer runs even where WebGPU is
+# unavailable (and so it can be verified in headless Chromium).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", features = ["webgl"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Event",
+    "EventTarget",
+    "MouseEvent",
+    "WheelEvent",
+    "KeyboardEvent",
+    "PointerEvent",
+    "CssStyleDeclaration",
+    "DomRect",
+] }
+
+# Native build is a no-op stub (keeps `cargo build` of the workspace green); the
+# real target is wasm32. wgpu native is intentionally not pulled in here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -1,0 +1,17 @@
+# Rust
+/target
+
+# Node (verification tooling)
+tools/node_modules
+tools/package-lock.json
+
+# Generated wasm bundle (CI rebuilds it for Pages)
+web/pkg
+
+# Large / raw assets — never commit these
+*.obj
+*.objv
+# ...but do keep the tiny demo sample
+!web/sample.objv
+
+.DS_Store
