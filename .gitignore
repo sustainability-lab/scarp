@@ -15,3 +15,7 @@ web/pkg
 !web/sample.objv
 
 .DS_Store
+
+# local-only (CI generates these into the deploy)
+web/CHANGELOG.md
+web/build-info.json

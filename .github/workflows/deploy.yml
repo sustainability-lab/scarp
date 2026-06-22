@@ -32,9 +32,17 @@ jobs:
         run: |
           mkdir -p _site
           cp -r web/* _site/
+          cp CHANGELOG.md _site/CHANGELOG.md
           touch _site/.nojekyll
           # Never publish raw OBJ or the heavy full-res mesh; the small sample stays.
-          rm -f _site/*.obj _site/WadiBirk_web.objv _site/WadiBirk_full.objv
+          rm -f _site/*.obj _site/WadiBirk_web.objv _site/WadiBirk_full.objv _site/Village.objv
+
+          # Cache-busting: stamp the short SHA into asset URLs so a new deploy is
+          # always fetched (GitHub Pages otherwise serves cached .js/.wasm).
+          BUILD="${GITHUB_SHA::7}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          find _site \( -name '*.html' -o -name '*.js' \) -exec sed -i "s/__BUILD__/${BUILD}/g" {} +
+          printf '{"short":"%s","sha":"%s","builtAt":"%s"}\n' "$BUILD" "$GITHUB_SHA" "$BUILT_AT" > _site/build-info.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

@@ -1,8 +1,9 @@
 // Module worker: runs OBJ→OBJV conversion off the main thread so the UI stays
 // responsive (animated progress) while a large file is parsed and compressed.
-import init, { convert_obj } from './pkg/objv_viewer.js';
+// `__BUILD__` is replaced with the short commit SHA at deploy time (cache-bust).
+import init, { convert_obj } from './pkg/objv_viewer.js?v=__BUILD__';
 
-const ready = init(); // instantiate this worker's own wasm (once)
+const ready = init('./pkg/objv_viewer_bg.wasm?v=__BUILD__'); // this worker's own wasm
 
 self.onmessage = async (e) => {
   const { buf, quantize } = e.data;

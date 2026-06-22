@@ -37,6 +37,19 @@
     border-radius: 8px; padding: 7px 12px; display: inline-flex; align-items: center; gap: 6px;
   }
   #hud .actions button:hover { border-color: rgba(255,255,255,0.25); }
+  #hud .build { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }
+  #hud .build a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  #hud .build a:hover { text-decoration: underline; }
+  #changelog { top: 50%; left: 50%; transform: translate(-50%,-50%); width: min(560px, 90vw);
+    max-height: 72vh; padding: 16px 18px; z-index: 40; display: flex; flex-direction: column; }
+  #changelog[hidden] { display: none; }
+  .cl-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .cl-head button { appearance: none; background: none; border: none; color: var(--muted);
+    font-size: 22px; line-height: 1; cursor: pointer; }
+  .cl-head button:hover { color: var(--text); }
+  #cl-body { margin: 0; overflow: auto; white-space: pre-wrap;
+    font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--text); }
   #download { display: block; align-self: stretch; max-width: 100%; word-break: break-word; line-height: 1.45;
     background: rgba(196,69,54,0.18); border-color: rgba(196,69,54,0.5); color: #ffb3a8; }
   #download[hidden] { display: none; }
@@ -105,6 +118,15 @@
     <button id="open">Open .obj / .objv…</button>
     <a id="download" hidden></a>
   </div>
+  <div class="build">
+    <span id="build-when">dev build</span>
+    <a id="changelog-link" href="#">what's new</a>
+  </div>
+</div>
+
+<div id="changelog" class="panel" hidden>
+  <div class="cl-head"><b>What's new</b><button id="cl-close" aria-label="close">×</button></div>
+  <pre id="cl-body">…</pre>
 </div>
 
 <div id="legend" class="panel">
@@ -153,7 +175,9 @@
 <input id="file" type="file" accept=".obj,.objv" hidden />
 
 <script type="module">
-import init, { start } from './pkg/objv_viewer.js';
+// `__BUILD__` is replaced with the short commit SHA at deploy time so a new
+// deploy busts the browser cache for the JS + wasm.
+import init, { start } from './pkg/objv_viewer.js?v=__BUILD__';
 
 const canvas = document.getElementById('gl');
 const statusEl = document.getElementById('status');
@@ -206,6 +230,41 @@ async function show(bytes, label) {
   }
 }
 
+// "Last deployed" stamp (written by CI as build-info.json).
+async function loadBuildInfo() {
+  try {
+    const r = await fetch('build-info.json?v=__BUILD__', { cache: 'no-store' });
+    if (!r.ok) throw 0;
+    const b = await r.json();
+    const when = new Date(b.builtAt).toLocaleString(undefined, {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+    });
+    const el = document.getElementById('build-when');
+    el.textContent = 'updated ' + when;
+    el.title = 'commit ' + (b.short || '');
+  } catch (_) {
+    document.getElementById('build-when').textContent = 'dev build';
+  }
+}
+
+// Changelog modal.
+const clPanel = document.getElementById('changelog');
+document.getElementById('changelog-link').addEventListener('click', async e => {
+  e.preventDefault();
+  if (!clPanel.hidden) { clPanel.hidden = true; return; }
+  const body = document.getElementById('cl-body');
+  if (body.dataset.loaded !== '1') {
+    try {
+      const r = await fetch('CHANGELOG.md?v=__BUILD__', { cache: 'no-store' });
+      body.textContent = r.ok ? await r.text() : 'Changelog unavailable.';
+    } catch (_) { body.textContent = 'Changelog unavailable.'; }
+    body.dataset.loaded = '1';
+  }
+  clPanel.hidden = false;
+});
+document.getElementById('cl-close').addEventListener('click', () => clPanel.hidden = true);
+
 function offerDownload(bytes, filename) {
   const a = document.getElementById('download');
   a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
@@ -218,7 +277,7 @@ function offerDownload(bytes, filename) {
 // moving even for a 1 GB file.
 function convertViaWorker(file, onTick) {
   return new Promise(async (resolve, reject) => {
-    const worker = new Worker('./convert-worker.js', { type: 'module' });
+    const worker = new Worker('./convert-worker.js?v=__BUILD__', { type: 'module' });
     const buf = await file.arrayBuffer();
     const t0 = performance.now();
     const timer = setInterval(() => onTick((performance.now() - t0) / 1000), 250);
@@ -270,8 +329,9 @@ document.getElementById('file').addEventListener('change', e => {
 
 (async function main() {
   setStatus('loading wasm…', 'busy');
-  await init();
+  await init('./pkg/objv_viewer_bg.wasm?v=__BUILD__');
   updateLegend('2');
+  loadBuildInfo();
   // Default to the tiny bundled sample; pass ?mesh=… for your own file
   // (e.g. ?mesh=WadiBirk_web.objv locally), or ?mesh=none to start empty.
   const url = new URLSearchParams(location.search).get('mesh') || 'sample.objv';
