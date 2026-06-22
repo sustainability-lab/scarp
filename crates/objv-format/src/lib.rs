@@ -72,6 +72,11 @@ impl Codec {
 
 const ATTR_QUANT_POS: u8 = 0x01;
 const ATTR_HAS_NORMALS: u8 = 0x02;
+/// Indices stored as zigzag-varint deltas (lossless) rather than raw `u32`.
+/// Combined with first-use vertex ordering this shrinks the index stream a lot.
+const ATTR_DELTA_IDX: u8 = 0x04;
+/// Quantized positions stored as per-axis zigzag-varint deltas (vs raw `u16`).
+const ATTR_DELTA_POS: u8 = 0x08;
 
 /// How to encode geometry into the payload.
 #[derive(Clone, Copy, Debug)]
@@ -123,9 +128,9 @@ impl Mesh {
         let icount = self.indices.len() as u32;
         let store_normals = opts.store_normals && self.normals.len() == self.positions.len();
 
-        let mut attr = 0u8;
+        let mut attr = ATTR_DELTA_IDX; // indices always delta-varint encoded
         if opts.quantize_positions {
-            attr |= ATTR_QUANT_POS;
+            attr |= ATTR_QUANT_POS | ATTR_DELTA_POS;
         }
         if store_normals {
             attr |= ATTR_HAS_NORMALS;
@@ -154,11 +159,19 @@ impl Mesh {
         out.extend_from_slice(&icount.to_le_bytes());
 
         if opts.quantize_positions {
+            // Quantize to u16, then store per-axis zigzag-varint deltas from the
+            // previous vertex. With first-use ordering, neighbouring vertices are
+            // spatially close, so these deltas are small. Lossless w.r.t. the u16.
             let scale = quant_scale(self.bbox_min, self.bbox_max);
-            for i in 0..self.positions.len() {
-                let axis = i % 3;
-                let q = quantize(self.positions[i], self.bbox_min[axis], scale[axis]);
-                out.extend_from_slice(&q.to_le_bytes());
+            let nverts = self.positions.len() / 3;
+            let mut prev = [0i64; 3];
+            for v in 0..nverts {
+                for axis in 0..3 {
+                    let q = quantize(self.positions[v * 3 + axis], self.bbox_min[axis], scale[axis])
+                        as i64;
+                    write_uvarint(&mut out, zigzag(q - prev[axis]));
+                    prev[axis] = q;
+                }
             }
         } else {
             for &v in &self.positions {
@@ -170,8 +183,14 @@ impl Mesh {
                 out.extend_from_slice(&v.to_le_bytes());
             }
         }
+        // Indices: zigzag-varint of the delta from the previous index. With
+        // first-use vertex ordering these deltas are small, so most indices
+        // take 1–2 bytes instead of 4 — and zstd squeezes them further.
+        let mut prev: i64 = 0;
         for &v in &self.indices {
-            out.extend_from_slice(&v.to_le_bytes());
+            let cur = v as i64;
+            write_uvarint(&mut out, zigzag(cur - prev));
+            prev = cur;
         }
         out
     }
@@ -183,7 +202,9 @@ impl Mesh {
         let attr = r.u8()?;
         let _ = r.take::<3>()?; // pad
         let quantized = attr & ATTR_QUANT_POS != 0;
+        let delta_pos = attr & ATTR_DELTA_POS != 0;
         let has_normals = attr & ATTR_HAS_NORMALS != 0;
+        let delta_idx = attr & ATTR_DELTA_IDX != 0;
 
         let origin = [r.f64()?, r.f64()?, r.f64()?];
         let bbox_min = [r.f32()?, r.f32()?, r.f32()?];
@@ -194,9 +215,19 @@ impl Mesh {
         let mut positions = vec![0.0f32; vcount * 3];
         if quantized {
             let scale = quant_scale(bbox_min, bbox_max);
-            for (i, p) in positions.iter_mut().enumerate() {
-                let axis = i % 3;
-                *p = dequantize(r.u16()?, bbox_min[axis], scale[axis]);
+            if delta_pos {
+                let mut prev = [0i64; 3];
+                for v in 0..vcount {
+                    for axis in 0..3 {
+                        prev[axis] += unzigzag(r.uvarint()?);
+                        positions[v * 3 + axis] =
+                            dequantize(prev[axis] as u16, bbox_min[axis], scale[axis]);
+                    }
+                }
+            } else {
+                for (i, p) in positions.iter_mut().enumerate() {
+                    *p = dequantize(r.u16()?, bbox_min[i % 3], scale[i % 3]);
+                }
             }
         } else {
             for p in positions.iter_mut() {
@@ -213,8 +244,16 @@ impl Mesh {
         }
 
         let mut indices = vec![0u32; icount];
-        for i in indices.iter_mut() {
-            *i = r.u32()?;
+        if delta_idx {
+            let mut prev: i64 = 0;
+            for i in indices.iter_mut() {
+                prev += unzigzag(r.uvarint()?);
+                *i = prev as u32;
+            }
+        } else {
+            for i in indices.iter_mut() {
+                *i = r.u32()?;
+            }
         }
         Ok(Mesh {
             origin,
@@ -235,6 +274,27 @@ fn quant_scale(min: [f32; 3], max: [f32; 3]) -> [f32; 3] {
         s[k] = if span > 0.0 { span / 65535.0 } else { 1.0 };
     }
     s
+}
+
+/// Map a signed delta to an unsigned value with small magnitudes near zero.
+fn zigzag(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+fn unzigzag(z: u64) -> i64 {
+    ((z >> 1) as i64) ^ -((z & 1) as i64)
+}
+/// Append an unsigned LEB128 varint.
+fn write_uvarint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            out.push(byte | 0x80);
+        } else {
+            out.push(byte);
+            break;
+        }
+    }
 }
 
 fn quantize(v: f32, min: f32, scale: f32) -> u16 {
@@ -335,6 +395,25 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, FormatError> {
         Ok(u16::from_le_bytes(self.take::<2>()?))
     }
+    fn uvarint(&mut self) -> Result<u64, FormatError> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            if self.pos >= self.buf.len() {
+                return Err(FormatError::Truncated);
+            }
+            let byte = self.buf[self.pos];
+            self.pos += 1;
+            result |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err(FormatError::Truncated); // malformed varint
+            }
+        }
+    }
     fn f64(&mut self) -> Result<f64, FormatError> {
         Ok(f64::from_le_bytes(self.take::<8>()?))
     }
@@ -396,6 +475,22 @@ mod tests {
         // Endpoints quantize exactly to 0 and 65535.
         assert_eq!(back.positions[0], mesh.bbox_min[0]);
         assert_eq!(back.positions[3], mesh.bbox_max[0]);
+    }
+
+    #[test]
+    fn delta_indices_roundtrip_with_jumps() {
+        // Indices with forward and backward jumps exercise multi-byte varints
+        // and negative zigzag deltas.
+        let mut mesh = sample();
+        mesh.positions = vec![0.0; 300_003]; // 100001 vertices
+        mesh.normals.clear();
+        mesh.indices = vec![0, 100000, 1, 50000, 100000, 2, 0, 99999];
+        let payload = mesh.to_payload(EncodeOptions {
+            quantize_positions: true,
+            store_normals: false,
+        });
+        let back = Mesh::from_payload(&payload).unwrap();
+        assert_eq!(back.indices, mesh.indices);
     }
 
     #[test]

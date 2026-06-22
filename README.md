@@ -18,7 +18,7 @@ client-side. Meshes are stored in a compact `.objv` container.
   quantized and compressed to a compact `.objv` you can download. Drop a `.objv`
   and it just views. No CLI, no upload.
 - **Renderer** — 2.5 MB wasm. WebGPU with a **WebGL2 fallback**. Handles the full
-  10M-triangle Wadi Birk escarpment from an 84 MB file.
+  10M-triangle Wadi Birk escarpment from a 60 MB file.
 - **Colormaps** — shaded relief · elevation · slope · aspect, each with a legend
   (keys `1`–`4`).
 - **Analysis tools** (keys `n`/`m`/`s`/`d`):
@@ -37,10 +37,15 @@ A photogrammetry OBJ stores coordinates as ~18-digit ASCII text in world UTM
 
 1. subtracts an `f64` **origin** so local coords fit `f32` to sub-mm over km;
 2. **quantizes** positions to `u16` (raw `f32` barely compresses; integers do);
-3. derives normals in-shader (no normal buffer stored);
-4. compresses — **zstd** from the CLI, pure-Rust **deflate** in the browser.
+3. **reorders** vertices into first-use order, then **delta + zigzag + varint**
+   codes both indices and positions — fully lossless, and it shrinks the index
+   stream from 4 bytes/index to ~1–2;
+4. derives normals in-shader (no normal buffer stored);
+5. compresses — **zstd** from the CLI, pure-Rust **deflate** in the browser.
 
-Result on the sample dataset: **1.0 GB → 84 MB** (12×), loads and renders smoothly.
+Result on the sample dataset: **1.0 GB → 60 MB** (17×; `--level 19` → 57 MB),
+loads and renders smoothly. Steps 1–3 are lossless; only the `u16` quantization
+in step 2 is lossy (~3 cm horizontal), and `--f32` turns that off too.
 
 ## Build & run locally
 
@@ -85,8 +90,9 @@ raw/full meshes are never published (a tiny `sample.objv` ships as the demo).
 
 ## Roadmap
 
-- [ ] Crush the index buffer further (mesh decimation / LOD + index coding) →
-      target < 40 MB and smoother on weak GPUs.
+- [x] Lossless index + position coding (first-use reorder + delta-varint).
+- [ ] Optional mesh decimation / LOD (lossy, keeps the full-res original) →
+      smaller still and smoother on weak GPUs.
 - [ ] Run the in-browser conversion in a Web Worker (keep the UI responsive on
       very large files).
 - [ ] Optional glTF / 3D Tiles export for interop with deck.gl / GeoLibre.

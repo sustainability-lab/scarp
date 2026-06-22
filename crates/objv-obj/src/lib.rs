@@ -18,15 +18,55 @@ pub struct ObjParse {
     pub dropped_triangles: usize,
 }
 
-/// Parse OBJ text into a mesh (origin-offset, normals computed).
+/// Parse OBJ text into a mesh (origin-offset, normals computed,
+/// vertices reordered for compression).
 pub fn obj_to_mesh(text: &str) -> ObjParse {
     let parsed = parse_obj(text);
     let skipped_lines = parsed.skipped;
-    let (mesh, dropped_triangles) = build_mesh(parsed);
+    let (mut mesh, dropped_triangles) = build_mesh(parsed);
+    optimize_vertex_fetch(&mut mesh);
     ObjParse {
         mesh,
         skipped_lines,
         dropped_triangles,
+    }
+}
+
+/// Relabel vertices in the order triangles first reference them (a lossless
+/// permutation; positions/normals move with their vertex). This makes adjacent
+/// indices numerically close, so the delta-varint index codec — and zstd —
+/// compress the index stream far better. Unreferenced vertices are dropped.
+fn optimize_vertex_fetch(mesh: &mut Mesh) {
+    let nv = mesh.positions.len() / 3;
+    if nv == 0 {
+        return;
+    }
+    let has_normals = mesh.normals.len() == mesh.positions.len();
+    let mut remap = vec![u32::MAX; nv];
+    let mut new_pos = Vec::with_capacity(mesh.positions.len());
+    let mut new_nrm = if has_normals {
+        Vec::with_capacity(mesh.normals.len())
+    } else {
+        Vec::new()
+    };
+    let mut next: u32 = 0;
+    for idx in mesh.indices.iter_mut() {
+        let old = *idx as usize;
+        let mut n = remap[old];
+        if n == u32::MAX {
+            n = next;
+            next += 1;
+            remap[old] = n;
+            new_pos.extend_from_slice(&mesh.positions[old * 3..old * 3 + 3]);
+            if has_normals {
+                new_nrm.extend_from_slice(&mesh.normals[old * 3..old * 3 + 3]);
+            }
+        }
+        *idx = n;
+    }
+    mesh.positions = new_pos;
+    if has_normals {
+        mesh.normals = new_nrm;
     }
 }
 
