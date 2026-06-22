@@ -72,6 +72,13 @@
   #status { bottom: 16px; right: 16px; padding: 8px 14px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   #status.busy { color: #ffd479; } #status.error { color: #ff7a6c; }
 
+  /* indeterminate top loading bar — animates because conversion runs in a worker */
+  #progress { position: fixed; top: 0; left: 0; height: 3px; width: 100%; overflow: hidden; z-index: 30; display: none; }
+  #progress.on { display: block; }
+  #progress::before { content: ''; position: absolute; height: 100%; width: 35%; border-radius: 2px;
+    background: var(--accent); animation: slide 1.1s infinite ease-in-out; }
+  @keyframes slide { from { left: -35%; } to { left: 100%; } }
+
   #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     background: rgba(12,14,18,0.7); backdrop-filter: blur(4px); z-index: 10; border: 2px dashed var(--accent); font-size: 18px; }
   body.dragging #drop { display: flex; }
@@ -79,6 +86,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
+<div id="progress"></div>
 
 <div id="hud" class="panel">
   <h1><b>Scarp</b> · virtual outcrop viewer</h1>
@@ -144,7 +152,7 @@
 <input id="file" type="file" accept=".obj,.objv" hidden />
 
 <script type="module">
-import init, { start, convert_obj } from './pkg/objv_viewer.js';
+import init, { start } from './pkg/objv_viewer.js';
 
 const canvas = document.getElementById('gl');
 const statusEl = document.getElementById('status');
@@ -180,14 +188,21 @@ window.addEventListener('keydown', e => {
   if ('nmsd'.includes(e.key.toLowerCase()) && e.key.length === 1) setActive('#tools', e.key.toLowerCase());
 });
 
-let started = false;
-function loadBytes(bytes, label) {
+let viewer = null;                 // wasm Viewer handle once the first mesh loads
+const progress = document.getElementById('progress');
+const showProgress = on => progress.classList.toggle('on', on);
+
+// Display .objv bytes: create the viewer on first use, then reuse it (no reload).
+async function show(bytes, label) {
   document.getElementById('m-size').textContent = (bytes.length / 1e6).toFixed(1) + ' MB';
-  if (started) { location.reload(); return; }
-  started = true;
   setStatus('uploading to GPU…', 'busy');
-  start(canvas, bytes);
-  setTimeout(() => setStatus(label || 'ready', ''), 400);
+  try {
+    if (!viewer) viewer = await start(canvas, bytes);
+    else viewer.load(bytes);
+    setStatus(label || 'ready', '');
+  } catch (e) {
+    setStatus('load failed: ' + e, 'error');
+  }
 }
 
 function offerDownload(bytes, filename) {
@@ -198,33 +213,51 @@ function offerDownload(bytes, filename) {
   a.hidden = false;
 }
 
-// Route a dropped/opened file: .obj is converted in-browser, then viewed;
-// .objv is viewed directly.
+// Convert an OBJ in a Web Worker so the main thread (and the progress bar) keep
+// moving even for a 1 GB file.
+function convertViaWorker(file, onTick) {
+  return new Promise(async (resolve, reject) => {
+    const worker = new Worker('./convert-worker.js', { type: 'module' });
+    const buf = await file.arrayBuffer();
+    const t0 = performance.now();
+    const timer = setInterval(() => onTick((performance.now() - t0) / 1000), 250);
+    const done = (fn, arg) => { clearInterval(timer); worker.terminate(); fn(arg); };
+    worker.onmessage = e => {
+      if (e.data.type === 'done') done(resolve, { objv: e.data.objv, ms: e.data.ms });
+      else if (e.data.type === 'error') done(reject, e.data.msg);
+    };
+    worker.onerror = e => done(reject, e.message || 'worker error');
+    worker.postMessage({ buf, quantize: true }, [buf]); // transfer (no copy)
+  });
+}
+
+// Route a dropped/opened file: .obj converts (in a worker) then views + offers
+// a download; .objv views directly.
 async function handleFile(file) {
-  const buf = new Uint8Array(await file.arrayBuffer());
   if (file.name.toLowerCase().endsWith('.obj')) {
-    setStatus('converting OBJ in-browser…', 'busy');
-    // Let the status paint before the (synchronous) conversion blocks the thread.
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const inMB = file.size / 1e6;
+    showProgress(true);
+    setStatus(`converting ${inMB.toFixed(0)} MB OBJ…`, 'busy');
     try {
-      const t0 = performance.now();
-      const objv = convert_obj(buf, true);
-      const ms = Math.round(performance.now() - t0);
+      const { objv, ms } = await convertViaWorker(file,
+        secs => setStatus(`converting ${inMB.toFixed(0)} MB OBJ…  ${secs.toFixed(0)}s`, 'busy'));
+      showProgress(false);
       const outName = file.name.replace(/\.obj$/i, '.objv');
       offerDownload(objv, outName);
-      setStatus(`compressed ${(buf.length/1e6).toFixed(0)} → ${(objv.length/1e6).toFixed(1)} MB in ${ms} ms`, '');
-      loadBytes(objv, outName);
+      setStatus(`compressed ${inMB.toFixed(0)} → ${(objv.length / 1e6).toFixed(1)} MB in ${(ms / 1000).toFixed(1)}s`, '');
+      await show(objv, outName);
     } catch (e) {
+      showProgress(false);
       setStatus('convert failed: ' + e, 'error');
     }
   } else {
-    loadBytes(buf, file.name);
+    await show(new Uint8Array(await file.arrayBuffer()), file.name);
   }
 }
 
 window.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
 window.addEventListener('dragleave', e => { if (e.target.id === 'drop') document.body.classList.remove('dragging'); });
-window.addEventListener('drop', async e => {
+window.addEventListener('drop', e => {
   e.preventDefault(); document.body.classList.remove('dragging');
   const f = e.dataTransfer.files[0];
   if (f) handleFile(f);
@@ -238,16 +271,16 @@ document.getElementById('file').addEventListener('change', e => {
   setStatus('loading wasm…', 'busy');
   await init();
   updateLegend('2');
-  setStatus('ready — drop an .objv or load default', '');
+  // Default to the tiny bundled sample; pass ?mesh=… for your own file
+  // (e.g. ?mesh=WadiBirk_web.objv locally), or ?mesh=none to start empty.
+  const url = new URLSearchParams(location.search).get('mesh') || 'sample.objv';
+  if (url === 'none') { setStatus('ready — drop a .obj or .objv to load', ''); return; }
   try {
-    // Default to the tiny bundled sample; pass ?mesh=… for your own file
-    // (e.g. ?mesh=WadiBirk_web.objv when viewing locally).
-    const url = new URLSearchParams(location.search).get('mesh') || 'sample.objv';
     setStatus('fetching ' + url + '…', 'busy');
     const res = await fetch(url);
-    if (res.ok) loadBytes(new Uint8Array(await res.arrayBuffer()), url);
-    else setStatus('ready — drop an .objv to load', '');
-  } catch (_) { setStatus('ready — drop an .objv to load', ''); }
+    if (res.ok) await show(new Uint8Array(await res.arrayBuffer()), url);
+    else setStatus('ready — drop a .obj or .objv to load', '');
+  } catch (_) { setStatus('ready — drop a .obj or .objv to load', ''); }
 })();
 </script>
 </body>

@@ -372,27 +372,7 @@ impl State {
             cache: None,
         });
 
-        let center = Vec3::new(
-            0.5 * (mesh.bbox_min[0] + mesh.bbox_max[0]),
-            0.5 * (mesh.bbox_min[1] + mesh.bbox_max[1]),
-            0.5 * (mesh.bbox_min[2] + mesh.bbox_max[2]),
-        );
-        let extent = Vec3::new(
-            mesh.bbox_max[0] - mesh.bbox_min[0],
-            mesh.bbox_max[1] - mesh.bbox_min[1],
-            mesh.bbox_max[2] - mesh.bbox_min[2],
-        );
-        // Frame on the horizontal footprint so long, thin escarpments fill the
-        // view rather than being sized by their (small) vertical extent.
-        let footprint = 0.5 * extent.truncate().length();
-        let radius = footprint.max(0.5 * extent.max_element());
-        let camera = Camera {
-            target: center,
-            radius,
-            distance: radius * 1.8,
-            yaw: 0.6,
-            pitch: 0.32,
-        };
+        let camera = camera_for(mesh.bbox_min, mesh.bbox_max);
 
         Ok(State {
             surface,
@@ -439,6 +419,51 @@ impl State {
             self.surface.configure(&self.device, &self.config);
             self.depth_view = make_depth(&self.device, w, h);
         }
+    }
+
+    /// Swap in a new mesh on the existing GPU device (rebuild buffers + CPU
+    /// geometry, reframe the camera, reset tools). Keeps the colormap mode.
+    fn replace_mesh(&mut self, mesh: objv_format::Mesh) {
+        set_text("m-verts", &group_thousands(mesh.vertex_count()));
+        set_text("m-tris", &group_thousands(mesh.triangle_count()));
+        set_text(
+            "leg-zmax",
+            &format!("{:.0} m", mesh.origin[2] + mesh.bbox_max[2] as f64),
+        );
+        set_text(
+            "leg-zmin",
+            &format!("{:.0} m", mesh.origin[2] + mesh.bbox_min[2] as f64),
+        );
+
+        self.vertex_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vertices"),
+                contents: bytemuck::cast_slice(&mesh.positions),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.index_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("indices"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.index_count = mesh.indices.len() as u32;
+        self.z_min = mesh.bbox_min[2];
+        self.z_max = mesh.bbox_max[2];
+        self.camera = camera_for(mesh.bbox_min, mesh.bbox_max);
+        self.cpu_positions = mesh.positions;
+        self.cpu_indices = mesh.indices;
+
+        // Reset any in-progress measurement.
+        self.tool = Tool::Navigate;
+        self.points.clear();
+        self.section_segs.clear();
+        self.overlay_buf = None;
+        self.overlay_count = 0;
+        set_text("m-tool", "navigate");
+        set_text("results", "navigate · pick a tool to measure");
     }
 
     fn set_tool(&mut self, tool: Tool) {
@@ -768,6 +793,30 @@ impl State {
     }
 }
 
+/// Frame the camera on a bounding box. Uses the horizontal footprint so long,
+/// thin escarpments fill the view rather than being sized by their height.
+fn camera_for(bbox_min: [f32; 3], bbox_max: [f32; 3]) -> Camera {
+    let center = Vec3::new(
+        0.5 * (bbox_min[0] + bbox_max[0]),
+        0.5 * (bbox_min[1] + bbox_max[1]),
+        0.5 * (bbox_min[2] + bbox_max[2]),
+    );
+    let extent = Vec3::new(
+        bbox_max[0] - bbox_min[0],
+        bbox_max[1] - bbox_min[1],
+        bbox_max[2] - bbox_min[2],
+    );
+    let footprint = 0.5 * extent.truncate().length();
+    let radius = footprint.max(0.5 * extent.max_element()).max(1.0);
+    Camera {
+        target: center,
+        radius,
+        distance: radius * 1.8,
+        yaw: 0.6,
+        pitch: 0.32,
+    }
+}
+
 fn push_line(v: &mut Vec<OverlayVertex>, a: [f32; 3], b: [f32; 3], color: [f32; 3]) {
     v.push(OverlayVertex { pos: a, color });
     v.push(OverlayVertex { pos: b, color });
@@ -852,8 +901,12 @@ fn decode_objv(data: &[u8]) -> Result<objv_format::Mesh, String> {
 /// Returned bytes are ready to download *and* to feed back into [`start`].
 #[wasm_bindgen]
 pub fn convert_obj(obj: Vec<u8>, quantize: bool) -> Result<Vec<u8>, JsValue> {
-    let text = std::str::from_utf8(&obj).map_err(|_| JsValue::from_str("OBJ is not UTF-8/ASCII"))?;
-    let parsed = objv_obj::obj_to_mesh(text);
+    let parsed = {
+        let text =
+            std::str::from_utf8(&obj).map_err(|_| JsValue::from_str("OBJ is not UTF-8/ASCII"))?;
+        objv_obj::obj_to_mesh(text)
+    };
+    drop(obj); // free the (possibly ~1 GB) source before encoding/compressing
     log::info!(
         "converted OBJ: {} verts, {} tris",
         parsed.mesh.vertex_count(),
@@ -872,25 +925,40 @@ pub fn convert_obj(obj: Vec<u8>, quantize: bool) -> Result<Vec<u8>, JsValue> {
 
 // --- JS entry point + event wiring -----------------------------------------
 
-/// Called from JS: take over `canvas` and render the given `.objv` bytes.
+/// A live viewer handle returned to JS. Holds the shared render state so JS can
+/// swap in new meshes without recreating the GPU device or reloading the page.
 #[wasm_bindgen]
-pub fn start(canvas: HtmlCanvasElement, data: Vec<u8>) {
+pub struct Viewer {
+    state: Rc<RefCell<State>>,
+}
+
+#[wasm_bindgen]
+impl Viewer {
+    /// Decode an `.objv` and display it, replacing the current mesh.
+    pub fn load(&self, data: Vec<u8>) -> Result<(), JsValue> {
+        let mesh = decode_objv(&data).map_err(|e| JsValue::from_str(&e))?;
+        self.state.borrow_mut().replace_mesh(mesh);
+        Ok(())
+    }
+}
+
+/// Called from JS: take over `canvas`, render the given `.objv`, and return a
+/// [`Viewer`] handle for loading further meshes.
+#[wasm_bindgen]
+pub async fn start(canvas: HtmlCanvasElement, data: Vec<u8>) -> Result<Viewer, JsValue> {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
-    wasm_bindgen_futures::spawn_local(async move {
-        match State::new(canvas, &data).await {
-            Ok(state) => run_loop(state),
-            Err(e) => {
-                web_sys::console::error_1(&format!("objv-viewer init failed: {e}").into());
-            }
-        }
-    });
+    let state = State::new(canvas, &data)
+        .await
+        .map_err(|e| JsValue::from_str(&format!("objv-viewer init failed: {e}")))?;
+    let state = Rc::new(RefCell::new(state));
+    install_handlers(state.clone());
+    Ok(Viewer { state })
 }
 
 /// Install input listeners and start the requestAnimationFrame loop.
-fn run_loop(state: State) {
-    let canvas = state.canvas.clone();
-    let state = Rc::new(RefCell::new(state));
+fn install_handlers(state: Rc<RefCell<State>>) {
+    let canvas = state.borrow().canvas.clone();
     let window = web_sys::window().unwrap();
 
     // Orbit: drag to rotate.
